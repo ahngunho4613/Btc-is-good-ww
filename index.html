@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BTC 주봉 추세 분석기</title>
+    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        body { margin: 0; padding: 0; background-color: #131722; color: white; font-family: sans-serif; display: flex; flex-direction: column; height: 100vh; }
+        .header { padding: 10px; text-align: center; background-color: #1e222d; flex-shrink: 0; }
+        #main-chart { width: 100%; flex-grow: 3; }
+        #rsi-chart { width: 100%; flex-grow: 1; border-top: 1px solid #2B2B43; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h2>BTC/USDT 주봉 (거래량 & RSI)</h2>
+    </div>
+    <div id="main-chart"></div>
+    <div id="rsi-chart"></div>
+
+    <script>
+        const mainChart = LightweightCharts.createChart(document.getElementById('main-chart'), {
+            layout: { backgroundColor: '#131722', textColor: '#d1d4dc' },
+            grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } },
+            timeScale: { timeVisible: true }
+        });
+
+        const candleSeries = mainChart.addCandlestickSeries();
+        const volumeSeries = mainChart.addHistogramSeries({
+            color: '#26a69a',
+            priceFormat: { type: 'volume' },
+            priceScaleId: '',
+        });
+        mainChart.priceScale('').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+
+        const trendLineUpper = mainChart.addLineSeries({ color: '#ff4976', lineWidth: 2, lineStyle: 0 });
+        const trendLineLower = mainChart.addLineSeries({ color: '#4caf50', lineWidth: 2, lineStyle: 0 });
+
+        const rsiChart = LightweightCharts.createChart(document.getElementById('rsi-chart'), {
+            layout: { backgroundColor: '#131722', textColor: '#d1d4dc' },
+            grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } },
+            timeScale: { timeVisible: true }
+        });
+        const rsiSeries = rsiChart.addLineSeries({ color: '#b22833', lineWidth: 2, title: 'RSI 14' });
+        
+        mainChart.timeScale().subscribeVisibleTimeRangeChange(range => {
+            rsiChart.timeScale().setVisibleRange(range);
+        });
+
+        async function fetchAndAnalyzeData() {
+            // 주봉 데이터 호출
+            const response = await fetch('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1w&limit=500');
+            const data = await response.json();
+            
+            const candles = [];
+            const volumes = [];
+            
+            data.forEach(d => {
+                const time = d[0] / 1000;
+                const open = parseFloat(d[1]);
+                const high = parseFloat(d[2]);
+                const low = parseFloat(d[3]);
+                const close = parseFloat(d[4]);
+                const volume = parseFloat(d[5]);
+
+                candles.push({ time, open, high, low, close, volume });
+                volumes.push({ time, value: volume, color: close >= open ? '#26a69a' : '#ef5350' });
+            });
+            
+            candleSeries.setData(candles);
+            volumeSeries.setData(volumes);
+            
+            calculateRSI(candles);
+            drawTrendlines(candles);
+        }
+
+        function calculateRSI(data) {
+            const period = 14;
+            const rsiData = [];
+            let gains = 0;
+            let losses = 0;
+
+            for (let i = 1; i <= period; i++) {
+                const change = data[i].close - data[i - 1].close;
+                if (change > 0) gains += change;
+                else losses -= change;
+            }
+
+            let avgGain = gains / period;
+            let avgLoss = losses / period;
+
+            for (let i = period + 1; i < data.length; i++) {
+                const change = data[i].close - data[i - 1].close;
+                let currentGain = 0;
+                let currentLoss = 0;
+                if (change > 0) currentGain = change;
+                else currentLoss = -change;
+
+                avgGain = (avgGain * 13 + currentGain) / period;
+                avgLoss = (avgLoss * 13 + currentLoss) / period;
+
+                const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+                const rsi = 100 - (100 / (1 + rs));
+                rsiData.push({ time: data[i].time, value: rsi });
+            }
+            rsiSeries.setData(rsiData);
+        }
+
+        function drawTrendlines(data) {
+            const window = 2; 
+            const highs = [];
+            const lows = [];
+
+            // 고점 저점 탐색
+            for(let i = window; i < data.length - window; i++) {
+                let isHigh = true;
+                let isLow = true;
+                for(let j = -window; j <= window; j++) {
+                    if(j === 0) continue;
+                    if(data[i].high <= data[i+j].high) isHigh = false;
+                    if(data[i].low >= data[i+j].low) isLow = false;
+                }
+                if(isHigh) highs.push(data[i]);
+                if(isLow) lows.push(data[i]);
+            }
+
+            // 거래량순 정렬
+            highs.sort((a, b) => b.volume - a.volume);
+            lows.sort((a, b) => b.volume - a.volume);
+
+            if(highs.length >= 2 && lows.length >= 2) {
+                const topHighs = highs.slice(0, 2).sort((a, b) => a.time - b.time);
+                const topLows = lows.slice(0, 2).sort((a, b) => a.time - b.time);
+
+                const lastData = data[data.length - 1];
+                // 미래 시점(10주 후)으로 선 연장
+                const futureTime = lastData.time + (86400 * 7 * 10); 
+                
+                const highSlope = (topHighs[1].high - topHighs[0].high) / (topHighs[1].time - topHighs[0].time);
+                const projectedHigh = topHighs[1].high + highSlope * (futureTime - topHighs[1].time);
+                
+                trendLineUpper.setData([
+                    { time: topHighs[0].time, value: topHighs[0].high },
+                    { time: futureTime, value: projectedHigh }
+                ]);
+
+                const lowSlope = (topLows[1].low - topLows[0].low) / (topLows[1].time - topLows[0].time);
+                const projectedLow = topLows[1].low + lowSlope * (futureTime - topLows[1].time);
+                
+                trendLineLower.setData([
+                    { time: topLows[0].time, value: topLows[0].low },
+                    { time: futureTime, value: projectedLow }
+                ]);
+            }
+        }
+
+        fetchAndAnalyzeData();
+        // 30분 주기로 새로고침 유지
+        setInterval(fetchAndAnalyzeData, 1800000);
+    </script>
+</body>
+</html>
